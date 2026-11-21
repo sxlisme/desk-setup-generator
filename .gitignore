@@ -5,3 +5,8 @@ data/uploads/*
 !data/uploads/.gitkeep
 .env
 *.log
+
+data/backups/
+data/.restore-*
+.env.*
+!.env.example

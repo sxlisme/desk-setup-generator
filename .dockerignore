@@ -4,3 +4,9 @@ dist
 data/db.json
 data/uploads/*
 *.log
+
+.env
+.env.*
+data/backups
+data/.restore-*
+tests

@@ -1,7 +1,25 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import AdminPanel from './AdminPanel.vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
+const authenticated = ref(false)
+const authChecking = ref(true)
+const loginName = ref('admin')
+const loginPassword = ref('')
+const loginError = ref('')
+const csrfToken = ref('')
+const managementData = ref(null)
+const showManagement = ref(false)
+const activeTemplateId = ref(null)
+const templateSearch = ref('')
+const draftStatus = ref('草稿自动保存')
+let revision = ''
+let hydrating = false
+let draftTimer
+let draftQueue = Promise.resolve()
 const deviceTypes = ref([])
+const typeName = ref('')
+const creatingType = ref(false)
 const deviceLibrary = ref([])
 const templates = ref([])
 const activePanel = ref('content')
@@ -15,6 +33,7 @@ const busy = ref(false)
 const toast = ref('')
 const dragIndex = ref(null)
 const imageInput = ref(null)
+let deviceDialogVersion = 0
 
 const defaultConfig = () => ({
   title: '我的桌搭清单',
@@ -41,6 +60,11 @@ const newDevice = reactive({
   name: '', type: '显示器', detail1: '', detail2: '', brand: '', image: ''
 })
 const templateName = ref('')
+const activeTemplate = computed(() => templates.value.find(t => t.id === activeTemplateId.value))
+const filteredTemplates = computed(() => {
+  const query = templateSearch.value.trim().toLowerCase()
+  return templates.value.filter(t => `${t.name} ${t.id}`.toLowerCase().includes(query))
+})
 
 const filteredDevices = computed(() => {
   const keyword = search.value.trim().toLowerCase()
@@ -61,51 +85,173 @@ function notify(message) {
 }
 
 async function api(url, options = {}) {
+  const { responseType, ...requestOptions } = options
   const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers }
+    ...requestOptions,
+    credentials: 'same-origin',
+    headers: { ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), 'X-Requested-With': 'desk-setup', ...(revision ? { 'X-Data-Revision': revision } : {}), ...(csrfToken.value ? { 'X-CSRF-Token': csrfToken.value } : {}), ...options.headers }
   })
   if (!response.ok) {
+    if (response.status === 401) { authenticated.value = false; showManagement.value = false; csrfToken.value = '' }
     const body = await response.json().catch(() => ({}))
     throw new Error(body.message || '请求失败')
   }
+  if (responseType === 'blob') return response.blob()
   return response.status === 204 ? null : response.json()
 }
 
+async function applyBootstrap(data, useDraft = false) {
+  hydrating = true
+  deviceTypes.value = data.types
+  deviceLibrary.value = data.devices
+  templates.value = data.templates
+  revision = data.revision
+  managementData.value = data
+  if (useDraft) {
+    Object.assign(config, defaultConfig(), data.draft?.config || {})
+    activeTemplateId.value = data.draft?.templateId || null
+    if (!activeTemplate.value) activeTemplateId.value = null
+  }
+  if (!deviceTypes.value.includes(newDevice.type)) newDevice.type = deviceTypes.value[0] || ''
+  if (!deviceTypes.value.includes(typeFilter.value)) typeFilter.value = '全部'
+  await nextTick()
+  hydrating = false
+}
+
+async function initializeData() {
+  const data = await api('/api/bootstrap')
+  await applyBootstrap(data, true)
+  // Import pre-login browser drafts only into an installation that has no server draft.
+  if (!data.draft) {
+    let saved
+    try { saved = JSON.parse(localStorage.getItem('desk-setup-draft') || 'null') } catch { /* ignore damaged browser drafts */ }
+    hydrating = true
+    if (saved && !saved.revision) Object.assign(config, defaultConfig(), saved)
+    else config.devices = data.devices.slice(0, 8).map(item => ({ ...item, instanceId: `${item.id}-${Math.random()}` }))
+    await nextTick(); hydrating = false
+  }
+  await flushDraft()
+}
+
+async function login() {
+  if (busy.value) return
+  busy.value = true; loginError.value = ''
+  try {
+    const session = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: loginName.value, password: loginPassword.value }) })
+    csrfToken.value = session.csrfToken; authenticated.value = true; loginPassword.value = ''
+    await initializeData()
+  } catch (error) { loginError.value = error.message; if (authenticated.value) notify(error.message) }
+  finally { busy.value = false }
+}
+
+async function logout() {
+  if (busy.value) return
+  busy.value = true
+  try {
+    await flushDraft(); await api('/api/auth/logout', { method: 'POST' })
+    authenticated.value = false; csrfToken.value = ''; showManagement.value = false
+    showTemplateList.value = false; showTemplateModal.value = false; closeDeviceModal()
+  } catch (error) { notify(error.message) } finally { busy.value = false }
+}
+
+async function flushDraft() {
+  clearTimeout(draftTimer)
+  if (!authenticated.value || hydrating) return
+  const payload = { config: snapshot(), templateId: activeTemplateId.value, revision }
+  draftStatus.value = '正在保存草稿…'
+  const request = draftQueue.catch(() => {}).then(() => api('/api/draft', { method: 'PUT', body: JSON.stringify(payload) }))
+  draftQueue = request
+  try {
+    await request
+    localStorage.setItem('desk-setup-draft', JSON.stringify(payload))
+    draftStatus.value = '草稿已保存'
+  } catch (error) { draftStatus.value = `草稿未保存：${error.message}`; throw error }
+}
+
+async function openManagement() {
+  try { await flushDraft(); managementData.value = await api('/api/bootstrap'); showManagement.value = true }
+  catch(error) { notify(error.message) }
+}
+async function managementChanged(data) {
+  clearTimeout(draftTimer)
+  await applyBootstrap(data, true)
+  localStorage.setItem('desk-setup-draft', JSON.stringify({ config: snapshot(), templateId: activeTemplateId.value, revision }))
+  draftStatus.value = '草稿已保存'
+}
+
+async function addDeviceType(selectForDevice = false) {
+  if (creatingType.value) return
+  const name = typeName.value.trim()
+  if (!name || name.length > 16 || name === '全部') {
+    return notify('请输入 1–16 个字符的类型名称，不能使用“全部”')
+  }
+  const dialogVersion = deviceDialogVersion
+  creatingType.value = true
+  try {
+    const result = await api('/api/types', { method: 'POST', body: JSON.stringify({ name }) })
+    deviceTypes.value = result.types
+    if (selectForDevice && showDeviceModal.value && dialogVersion === deviceDialogVersion) {
+      newDevice.type = result.name
+    }
+    if (typeName.value.trim() === name) typeName.value = ''
+    notify(`类型「${result.name}」已可用`)
+  } catch (error) {
+    notify(error.message)
+  } finally {
+    creatingType.value = false
+  }
+}
+
 async function uploadImage(file) {
+  if (!file.type.startsWith('image/')) throw new Error('请选择图片文件')
+  if (file.size > 12 * 1024 * 1024) throw new Error('图片不能超过 12 MB')
   const data = new FormData()
   data.append('image', file)
-  const response = await fetch('/api/upload', { method: 'POST', body: data })
-  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).message || '上传失败')
-  return (await response.json()).url
+  return (await api('/api/upload', { method: 'POST', body: data })).url
 }
 
-async function onHeroUpload(event) {
-  const file = event.target.files?.[0]
-  if (!file) return
+async function updateImage(file, target) {
+  if (busy.value) return notify('正在处理，请稍后再上传图片')
+  const dialogVersion = deviceDialogVersion
   busy.value = true
   try {
-    config.heroImage = await uploadImage(file)
-    notify('主照片已更新')
-  } catch (error) {
-    notify(error.message)
-  } finally {
-    busy.value = false
-    event.target.value = ''
-  }
-}
-
-async function onDeviceImageUpload(event) {
-  const file = event.target.files?.[0]
-  if (!file) return
-  busy.value = true
-  try {
-    newDevice.image = await uploadImage(file)
+    const url = await uploadImage(file)
+    if (target === 'device') {
+      // A closed or reopened dialog must not receive an earlier upload.
+      if (!showDeviceModal.value || dialogVersion !== deviceDialogVersion) return
+      newDevice.image = url
+      notify('设备图片已更新，保存后生效')
+    } else {
+      config.heroImage = url
+      notify('主照片已更新')
+    }
   } catch (error) {
     notify(error.message)
   } finally {
     busy.value = false
   }
+}
+
+async function onImageUpload(event, target) {
+  const file = event.target.files?.[0]
+  if (!file) return
+  await updateImage(file, target)
+  event.target.value = ''
+}
+
+function onImagePaste(event) {
+  const target = showDeviceModal.value
+    ? 'device'
+    : !showTemplateModal.value && !showTemplateList.value && event.target?.closest?.('.hero-upload')
+      ? 'hero'
+      : null
+  if (!target || event.defaultPrevented) return
+  const items = Array.from(event.clipboardData?.items || [])
+  const file = items.find(item => item.kind === 'file' && item.type.startsWith('image/'))?.getAsFile()
+    || Array.from(event.clipboardData?.files || []).find(file => file.type.startsWith('image/'))
+  if (!file) return
+  event.preventDefault()
+  return updateImage(file, target)
 }
 
 function addDevice(device) {
@@ -133,12 +279,14 @@ function resetNewDevice() {
 }
 
 function openCreateDevice() {
+  deviceDialogVersion += 1
   editingDeviceId.value = null
   resetNewDevice()
   showDeviceModal.value = true
 }
 
 function openEditDevice(device) {
+  deviceDialogVersion += 1
   editingDeviceId.value = device.id
   Object.assign(newDevice, {
     name: device.name || '',
@@ -152,12 +300,14 @@ function openEditDevice(device) {
 }
 
 function closeDeviceModal() {
+  deviceDialogVersion += 1
   showDeviceModal.value = false
   editingDeviceId.value = null
   resetNewDevice()
 }
 
 async function saveDevice() {
+  if (busy.value || creatingType.value) return
   if (!newDevice.name.trim()) return notify('请填写设备名称')
   busy.value = true
   try {
@@ -191,7 +341,12 @@ function snapshot() {
   return JSON.parse(JSON.stringify(config))
 }
 
+function templateCode(template) {
+  return template.id.replace(/^template-/, '')
+}
+
 async function saveTemplate() {
+  if (busy.value) return
   if (!templateName.value.trim()) return notify('请填写模板名称')
   busy.value = true
   try {
@@ -200,9 +355,11 @@ async function saveTemplate() {
       body: JSON.stringify({ name: templateName.value, config: snapshot() })
     })
     templates.value.unshift(template)
+    activeTemplateId.value = template.id
+    await flushDraft()
     showTemplateModal.value = false
     templateName.value = ''
-    notify('模板已保存')
+    notify(`模板已保存 · 编号 ${templateCode(template)}`)
   } catch (error) {
     notify(error.message)
   } finally {
@@ -210,19 +367,47 @@ async function saveTemplate() {
   }
 }
 
+function openSaveAs() {
+  templateName.value = activeTemplate.value ? `${activeTemplate.value.name} 副本` : config.title
+  showTemplateModal.value = true
+}
+async function updateTemplate() {
+  if (busy.value || !activeTemplate.value) return
+  busy.value = true
+  try {
+    const updated = await api(`/api/templates/${activeTemplateId.value}`, { method:'PUT', body:JSON.stringify({config:snapshot()}) })
+    templates.value.splice(templates.value.findIndex(t=>t.id===updated.id),1,updated)
+    await flushDraft(); notify('当前模板修改已保存')
+  } catch(error) { notify(error.message) } finally { busy.value=false }
+}
+async function renameTemplate(template) {
+  const name = window.prompt('请输入新的模板名称',template.name)
+  if (name === null || name.trim() === template.name) return
+  try {
+    const updated=await api(`/api/templates/${template.id}`,{method:'PUT',body:JSON.stringify({name})})
+    templates.value.splice(templates.value.findIndex(t=>t.id===updated.id),1,updated)
+    notify('模板已重命名')
+  } catch(error) { notify(error.message) }
+}
 function loadTemplate(template) {
   Object.assign(config, defaultConfig(), JSON.parse(JSON.stringify(template.config)))
+  activeTemplateId.value = template.id
   showTemplateList.value = false
-  notify(`已载入「${template.name}」`)
+  notify(`已载入「${template.name}」 · 编号 ${templateCode(template)}`)
 }
-
 async function deleteTemplate(template) {
-  await api(`/api/templates/${template.id}`, { method: 'DELETE' })
-  templates.value = templates.value.filter((item) => item.id !== template.id)
-  notify('模板已删除')
+  if (!window.confirm(`删除模板“${template.name}”（编号 ${templateCode(template)}）？`)) return
+  try {
+    clearTimeout(draftTimer); await draftQueue.catch(()=>{})
+    await api(`/api/templates/${template.id}`, { method: 'DELETE' })
+    templates.value = templates.value.filter(item=>item.id!==template.id)
+    if (activeTemplateId.value === template.id) activeTemplateId.value = null
+    await flushDraft(); notify('模板已删除')
+  } catch(error) { notify(error.message) }
 }
 
 function clearCanvas() {
+  activeTemplateId.value = null
   Object.assign(config, defaultConfig())
   notify('已恢复默认内容')
 }
@@ -259,6 +444,13 @@ function drawCover(ctx, image, x, y, width, height, position = 50) {
   const offsetX = x + (width - drawWidth) * (position / 100)
   const offsetY = y + (height - drawHeight) / 2
   ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight)
+}
+
+function drawContain(ctx, image, x, y, width, height) {
+  const scale = Math.min(width / image.width, height / image.height)
+  const drawWidth = image.width * scale
+  const drawHeight = image.height * scale
+  ctx.drawImage(image, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight)
 }
 
 function fitText(ctx, text, maxWidth, startSize, weight = 700) {
@@ -356,50 +548,51 @@ async function exportPng() {
       ctx.fill()
       ctx.shadowColor = 'transparent'
 
-      const imageSize = cardHeight - 42
+      const imageHeight = cardHeight - 42
+      const imageWidth = imageHeight * 4 / 3
       const imageX = x + 22
       const imageY = y + 21
       ctx.fillStyle = '#e8eef0'
-      roundedRect(ctx, imageX, imageY, imageSize, imageSize, 22)
+      roundedRect(ctx, imageX, imageY, imageWidth, imageHeight, 22)
       ctx.fill()
       if (device.image) {
         try {
           const itemImage = await loadImage(device.image)
           ctx.save()
-          roundedRect(ctx, imageX, imageY, imageSize, imageSize, 22)
+          roundedRect(ctx, imageX, imageY, imageWidth, imageHeight, 22)
           ctx.clip()
-          drawCover(ctx, itemImage, imageX, imageY, imageSize, imageSize)
+          drawContain(ctx, itemImage, imageX, imageY, imageWidth, imageHeight * 0.76)
           ctx.restore()
         } catch { /* keep placeholder */ }
       } else {
         ctx.fillStyle = config.accent
         ctx.textAlign = 'center'
         ctx.font = '800 70px "Microsoft YaHei", sans-serif'
-        ctx.fillText(device.type.slice(0, 1), imageX + imageSize / 2, imageY + imageSize / 2 + 24)
+        ctx.fillText(device.type.slice(0, 1), imageX + imageWidth / 2, imageY + imageHeight / 2 + 24)
       }
 
       ctx.fillStyle = config.accent
-      roundedRect(ctx, imageX + 20, imageY + imageSize - 54, imageSize - 40, 42, 21)
+      roundedRect(ctx, imageX + 20, imageY + imageHeight - 54, imageWidth - 40, 42, 21)
       ctx.fill()
       ctx.fillStyle = '#fff'
       ctx.textAlign = 'center'
       ctx.font = '700 24px "Microsoft YaHei", sans-serif'
-      ctx.fillText(device.type, imageX + imageSize / 2, imageY + imageSize - 24)
+      ctx.fillText(device.type, imageX + imageWidth / 2, imageY + imageHeight - 24)
 
-      const textX = imageX + imageSize + 42
-      const textWidth = cardWidth - imageSize - 92
+      const textX = imageX + imageWidth + 42
+      const textWidth = cardWidth - imageWidth - 92
       ctx.textAlign = 'left'
       ctx.fillStyle = '#172731'
       fitText(ctx, device.name, textWidth, 47, 800)
-      ctx.fillText(device.name, textX, y + 85)
+      ctx.fillText(device.name, textX, y + 85, textWidth)
       ctx.fillStyle = '#536873'
       ctx.font = '500 31px "Microsoft YaHei", sans-serif'
-      ctx.fillText(device.detail1 || '设备信息待补充', textX, y + 142)
-      ctx.fillText(device.detail2 || '使用体验待补充', textX, y + 192)
+      ctx.fillText(device.detail1 || '设备信息待补充', textX, y + 142, textWidth)
+      ctx.fillText(device.detail2 || '使用体验待补充', textX, y + 192, textWidth)
       if (device.brand) {
         ctx.fillStyle = '#8aa0aa'
         ctx.font = '500 25px "Microsoft YaHei", sans-serif'
-        ctx.fillText(device.brand, textX, y + cardHeight - 34)
+        ctx.fillText(device.brand, textX, y + cardHeight - 34, textWidth)
       }
     }
 
@@ -426,34 +619,40 @@ async function exportPng() {
   }
 }
 
-watch(config, () => {
-  localStorage.setItem('desk-setup-draft', JSON.stringify(snapshot()))
+watch([config, activeTemplateId], () => {
+  if (!authenticated.value || hydrating) return
+  clearTimeout(draftTimer)
+  draftStatus.value = '草稿待保存'
+  draftTimer = setTimeout(() => flushDraft().catch(() => {}), 500)
 }, { deep: true })
 
+onUnmounted(() => { document.removeEventListener('paste', onImagePaste); clearTimeout(draftTimer) })
 onMounted(async () => {
+  document.addEventListener('paste', onImagePaste)
   try {
-    const bootstrap = await api('/api/bootstrap')
-    deviceTypes.value = bootstrap.types
-    deviceLibrary.value = bootstrap.devices
-    templates.value = bootstrap.templates
-    newDevice.type = bootstrap.types[0]
-    const saved = localStorage.getItem('desk-setup-draft')
-    if (saved) {
-      Object.assign(config, defaultConfig(), JSON.parse(saved))
-    } else {
-      config.devices = bootstrap.devices.slice(0, 8).map((item) => ({
-        ...item,
-        instanceId: `${item.id}-${Math.random()}`
-      }))
-    }
-  } catch (error) {
-    notify('数据服务连接失败')
-  }
+    const session = await api('/api/auth/session')
+    csrfToken.value = session.csrfToken || ''
+    authenticated.value = session.authenticated
+    if (authenticated.value) await initializeData()
+  } catch(error) { loginError.value = error.message; notify(error.message) }
+  finally { authChecking.value = false }
 })
 </script>
 
 <template>
-  <div class="app-shell">
+  <main v-if="authChecking || !authenticated" class="login-page">
+    <form class="login-card" @submit.prevent="login">
+      <div class="brand-mark">D</div><h1>桌搭清单工作台</h1><p>登录后管理你的设备、模板和图片</p>
+      <p v-if="authChecking">正在检查登录状态…</p>
+      <template v-else>
+        <label class="field"><span>账号</span><input v-model="loginName" autocomplete="username" required /></label>
+        <label class="field"><span>密码</span><input v-model="loginPassword" type="password" autocomplete="current-password" required /></label>
+        <p v-if="loginError" class="notice error" role="alert">{{ loginError }}</p>
+        <button class="btn primary" :disabled="busy">{{ busy ? '正在登录…' : '登录' }}</button>
+      </template>
+    </form>
+  </main>
+  <div v-else class="app-shell">
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark">D</div>
@@ -467,7 +666,10 @@ onMounted(async () => {
           <span class="icon">▣</span> 模板库
           <span v-if="templates.length" class="count">{{ templates.length }}</span>
         </button>
-        <button class="btn ghost" @click="showTemplateModal = true"><span class="icon">◇</span> 保存模板</button>
+        <button class="btn ghost" :disabled="busy || !activeTemplate" @click="updateTemplate">保存修改</button>
+        <button class="btn ghost" :disabled="busy" @click="openSaveAs">另存为</button>
+        <button class="btn ghost" :disabled="busy" @click="openManagement">数据管理</button>
+        <button class="btn ghost" :disabled="busy" @click="logout">退出</button>
         <button class="btn primary" :disabled="busy" @click="exportPng"><span class="icon">↓</span> 导出 4K PNG</button>
       </div>
     </header>
@@ -482,11 +684,11 @@ onMounted(async () => {
         <div v-if="activePanel === 'content'" class="panel-scroll">
           <section class="control-section">
             <div class="section-heading"><span>主图</span><small>上半区域</small></div>
-            <button class="hero-upload" @click="imageInput?.click()">
+            <button class="hero-upload" title="点击选择图片，或聚焦此处后按 ⌘V / Ctrl+V 粘贴图片" @click="imageInput?.click()">
               <img :src="config.heroImage" alt="当前桌搭主图" />
-              <span><b>更换照片</b><small>JPG / PNG，不超过 12MB</small></span>
+              <span><b>更换照片</b><small>支持粘贴图片 · 不超过 12MB</small></span>
             </button>
-            <input ref="imageInput" hidden type="file" accept="image/*" @change="onHeroUpload" />
+            <input ref="imageInput" hidden type="file" accept="image/*" @change="onImageUpload($event, 'hero')" />
             <label class="range-label"><span>照片水平位置</span><b>{{ config.imagePosition }}%</b></label>
             <input v-model.number="config.imagePosition" type="range" min="0" max="100" />
           </section>
@@ -544,14 +746,14 @@ onMounted(async () => {
 
         <div class="panel-footer">
           <button class="text-btn" @click="clearCanvas">恢复全部默认</button>
-          <span>草稿自动保存</span>
+          <span :title="draftStatus">{{ draftStatus }}</span>
         </div>
       </aside>
 
       <section class="stage">
         <div class="stage-toolbar">
           <span><b>实时预览</b> <i>3:4</i></span>
-          <span class="stage-hint">拖动清单卡片可调整顺序</span>
+          <span class="stage-hint">{{ activeTemplate ? `正在编辑：${activeTemplate.name} · ${templateCode(activeTemplate)}` : '新清单 · 尚未另存为模板' }}</span>
         </div>
 
         <div class="preview-wrap">
@@ -626,9 +828,13 @@ onMounted(async () => {
           <button class="icon-button" title="新增设备" @click="openCreateDevice">＋</button>
         </div>
         <div class="search-box"><span>⌕</span><input v-model="search" placeholder="搜索设备或品牌" /></div>
-        <div class="type-filters">
-          <button :class="{ active: typeFilter === '全部' }" @click="typeFilter = '全部'">全部</button>
-          <button v-for="type in deviceTypes" :key="type" :class="{ active: typeFilter === type }" @click="typeFilter = type">{{ type }}</button>
+        <form class="type-create library-type-create" @submit.prevent="addDeviceType(false)">
+          <input v-model="typeName" aria-label="新增设备类型名称" placeholder="新类型，例如：摄像头" maxlength="16" :disabled="creatingType" />
+          <button class="btn small" :disabled="creatingType || !typeName.trim()">{{ creatingType ? '添加中…' : '＋ 类型' }}</button>
+        </form>
+        <div class="type-filters" role="group" aria-label="按设备类型筛选" tabindex="0">
+          <button :class="{ active: typeFilter === '全部' }" :aria-pressed="typeFilter === '全部'" @click="typeFilter = '全部'">全部</button>
+          <button v-for="type in deviceTypes" :key="type" :class="{ active: typeFilter === type }" :aria-pressed="typeFilter === type" @click="typeFilter = type">{{ type }}</button>
         </div>
         <div class="library-list">
           <article v-for="device in filteredDevices" :key="device.id" class="library-card">
@@ -656,26 +862,31 @@ onMounted(async () => {
       <form class="modal" @submit.prevent="saveDevice">
         <header><div><h2>{{ isEditingDevice ? '编辑设备' : '新增设备' }}</h2><p>{{ isEditingDevice ? '保存后会同步更新设备库和当前预览' : '保存后会进入设备库并加入当前预览' }}</p></div><button type="button" @click="closeDeviceModal">×</button></header>
         <div class="modal-grid">
-          <label class="image-field">
-            <input hidden type="file" accept="image/*" @change="onDeviceImageUpload" />
+          <label class="image-field" tabindex="0" aria-label="设备图片：点击上传或按 ⌘V / Ctrl+V 粘贴">
+            <input hidden type="file" accept="image/*" @change="onImageUpload($event, 'device')" />
             <img v-if="newDevice.image" :src="newDevice.image" alt="设备图片" />
-            <span v-else>＋<b>上传设备图</b><small>建议透明背景 PNG</small></span>
+            <span v-else>＋<b>上传设备图</b><small>建议 4:3 横图 · 800×600 PNG</small></span>
           </label>
           <div class="modal-fields">
             <label class="field"><span>设备名称 *</span><input v-model="newDevice.name" placeholder="例如：罗技 MX Master 3S" autofocus /></label>
             <label class="field"><span>设备类型 *</span><select v-model="newDevice.type"><option v-for="type in deviceTypes" :key="type">{{ type }}</option></select></label>
+            <div class="type-create" @keydown.enter.prevent.stop="addDeviceType(true)">
+              <input v-model="typeName" aria-label="新类型名称" placeholder="输入新类型" maxlength="16" :disabled="creatingType" />
+              <button type="button" class="btn small" :disabled="creatingType || !typeName.trim()" @click="addDeviceType(true)">{{ creatingType ? '添加中…' : '新增类型' }}</button>
+            </div>
             <label class="field"><span>品牌</span><input v-model="newDevice.brand" placeholder="选填" /></label>
           </div>
         </div>
+        <p class="image-paste-hint">可直接按 ⌘V / Ctrl+V 粘贴图片，支持截图或复制的图片，最大 12 MB。</p>
         <label class="field"><span>主要参数 / 特点</span><input v-model="newDevice.detail1" placeholder="例如：人体工学设计 · 静音按键" /></label>
         <label class="field"><span>使用体验</span><input v-model="newDevice.detail2" placeholder="例如：长时间办公也很舒适" /></label>
-        <footer><button type="button" class="btn ghost" @click="closeDeviceModal">取消</button><button class="btn primary" :disabled="busy">{{ isEditingDevice ? '保存修改' : '保存并添加' }}</button></footer>
+        <footer><button type="button" class="btn ghost" @click="closeDeviceModal">取消</button><button class="btn primary" :disabled="busy || creatingType">{{ isEditingDevice ? '保存修改' : '保存并添加' }}</button></footer>
       </form>
     </div>
 
     <div v-if="showTemplateModal" class="modal-backdrop" @click.self="showTemplateModal = false">
       <form class="modal compact" @submit.prevent="saveTemplate">
-        <header><div><h2>保存当前模板</h2><p>保存照片、文案、样式和设备顺序</p></div><button type="button" @click="showTemplateModal = false">×</button></header>
+        <header><div><h2>另存为模板</h2><p>创建独立模板，保留当前照片、文案和设备顺序</p></div><button type="button" @click="showTemplateModal = false">×</button></header>
         <label class="field"><span>模板名称</span><input v-model="templateName" placeholder="例如：银白桌搭 2026" autofocus /></label>
         <footer><button type="button" class="btn ghost" @click="showTemplateModal = false">取消</button><button class="btn primary" :disabled="busy">保存模板</button></footer>
       </form>
@@ -684,18 +895,25 @@ onMounted(async () => {
     <div v-if="showTemplateList" class="modal-backdrop" @click.self="showTemplateList = false">
       <section class="modal template-modal">
         <header><div><h2>模板库</h2><p>载入以前保存的桌搭清单</p></div><button @click="showTemplateList = false">×</button></header>
-        <div v-if="templates.length" class="template-list">
-          <article v-for="template in templates" :key="template.id">
+        <div class="search-box template-search"><input v-model="templateSearch" aria-label="搜索模板" placeholder="搜索模板名称或编号" /></div>
+        <div v-if="filteredTemplates.length" class="template-list">
+          <article v-for="template in filteredTemplates" :key="template.id">
             <div class="template-cover"><img :src="template.config.heroImage" alt="模板预览" /></div>
-            <div><h3>{{ template.name }}</h3><p>{{ template.config.devices.length }} 个设备 · {{ new Date(template.createdAt).toLocaleDateString('zh-CN') }}</p></div>
-            <button class="btn small" @click="loadTemplate(template)">载入</button>
-            <button class="danger-icon" title="删除模板" @click="deleteTemplate(template)">×</button>
+            <div class="template-info">
+              <h3>{{ template.name }}</h3>
+              <p class="template-id" :title="template.id">编号 {{ templateCode(template) }}</p>
+              <p>{{ template.config.devices.length }} 个设备 · {{ new Date(template.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</p>
+            </div>
+            <button class="btn small" :aria-label="`重命名 ${template.name}，编号 ${templateCode(template)}`" @click="renameTemplate(template)">重命名</button>
+            <button class="btn small" :aria-label="`载入 ${template.name}，编号 ${templateCode(template)}`" @click="loadTemplate(template)">载入</button>
+            <button class="danger-icon" :title="`删除模板，编号 ${templateCode(template)}`" :aria-label="`删除 ${template.name}，编号 ${templateCode(template)}`" @click="deleteTemplate(template)">×</button>
           </article>
         </div>
-        <div v-else class="empty-templates"><span>◇</span><b>还没有保存的模板</b><p>完成一套配置后，在顶部选择“保存模板”</p></div>
+        <div v-else class="empty-templates"><span>◇</span><b>{{ templates.length ? '没有匹配模板' : '还没有保存的模板' }}</b><p>可修改搜索条件，或在顶部选择“另存为”</p></div>
       </section>
     </div>
 
+    <AdminPanel v-if="showManagement" :request="api" :data="managementData" @close="showManagement=false" @change="managementChanged" />
     <transition name="toast"><div v-if="toast" class="toast">{{ toast }}</div></transition>
   </div>
 </template>
