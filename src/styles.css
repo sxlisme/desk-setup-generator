@@ -6,7 +6,7 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 1180px; min-height: 100vh; overflow: hidden; }
+body { margin: 0; min-width: 320px; min-height: 100vh; overflow: hidden; }
 button, input, select { font: inherit; }
 button { color: inherit; }
 
@@ -265,3 +265,98 @@ input[type="range"] { width: 100%; height: 4px; accent-color: #668796; cursor: p
 .backup-row small { display: block; margin-top: 5px; color: #8a9ca4; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 @media (max-width: 700px) { .asset-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+
+
+.mobile-nav, .mobile-export-label { display: none; }
+.image-position-hint { margin: 10px 0 0; color: #80949d; font-size: 11px; line-height: 1.6; }
+.export-backdrop { z-index: 35; }
+.export-modal { width: min(680px, 100%); max-height: 92vh; max-height: 92dvh; display: flex; flex-direction: column; min-height: 0; }
+.export-modal > header { flex: none; }
+.export-help, .export-footnote { flex: none; margin: 0 0 14px; color: #687c84; font-size: 12px; line-height: 1.7; }
+.export-footnote { margin: 12px 0 0; }
+.export-actions { flex: none; display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.export-actions a { text-decoration: none; }
+.export-preview { min-height: 0; overflow: auto; background: #dfe6e8; border-radius: 6px; }
+.export-preview img { display: block; width: 100%; height: auto; user-select: auto; -webkit-touch-callout: default; }
+
+@media (max-width: 1100px) {
+  .app-shell { height: 100vh; height: 100dvh; }
+  .topbar { height: auto; flex: none; display: block; padding: max(8px, env(safe-area-inset-top)) 12px 10px; }
+  .brand { margin-bottom: 8px; gap: 8px; }
+  .brand-mark { width: 28px; height: 28px; font-size: 17px; }
+  .brand strong { font-size: 14px; }
+  .brand span { display: none; }
+  .top-actions { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 6px; }
+  .top-actions .btn { min-width: 0; height: 36px; padding: 0 5px; font-size: 12px; gap: 4px; }
+  .desktop-export-label { display: none; }
+  .mobile-export-label { display: inline; }
+  .workspace { display: block; flex: 1; min-height: 0; height: auto; }
+  .workspace > .sidebar, .workspace > .stage { display: none; height: 100%; min-height: 0; }
+  .workspace.mobile-preview > .stage, .workspace.mobile-settings > .settings-panel, .workspace.mobile-library > .library-panel { display: flex; }
+  .sidebar { border: 0; }
+  .stage-toolbar { height: 38px; flex: none; padding: 0 12px; }
+  .stage-hint { display: block; max-width: 55%; font-size: 10px; }
+  .preview-wrap { display: flex; align-items: flex-start; justify-content: center; padding: 12px 14px 22px; }
+  .poster { width: 100%; max-width: 480px; flex: none; }
+  .mobile-nav { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); flex: none; padding: 6px 12px max(6px, env(safe-area-inset-bottom)); background: white; border-top: 1px solid #d6e1e4; gap: 8px; }
+  .mobile-nav button { height: 42px; color: #71858e; background: transparent; border: 0; border-radius: 7px; font-size: 14px; font-weight: 650; }
+  .mobile-nav button.active { color: #355363; background: #e9f0f2; }
+  .panel-tabs { flex: none; }
+  .panel-footer { flex: none; }
+  .control-section { padding: 18px 16px; }
+  .range-label, .field > span { font-size: 13px; }
+  input[type="range"] { height: 24px; }
+  .field input, .field select, .type-create input, .search-box input, .type-action input, .type-action select, .asset-toolbar > input { font-size: 16px; }
+  .field input, .field select { height: 44px; }
+  .hero-upload { height: 88px; }
+  .type-filters { max-height: 144px; }
+  .type-filters button { height: 34px; font-size: 12px; }
+  .search-box { height: 44px; }
+  .library-card { padding-right: 54px; }
+  .library-info h3 { font-size: 14px; }
+  .library-info p, .library-info > span { font-size: 11px; }
+  .library-card-actions button { width: 34px; height: 34px; }
+  .library-list { padding-top: 6px; }
+  .create-device { height: 44px; font-size: 13px; }
+  .card-actions { opacity: 1; transform: none; top: 0; right: 0; }
+  .card-actions button { width: 26px; height: 26px; font-size: 16px; }
+  .modal-backdrop { padding: max(12px, env(safe-area-inset-top)) 10px max(12px, env(safe-area-inset-bottom)); }
+  .modal { max-width: 100%; max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); overflow: auto; padding: 18px; }
+  .modal > header { gap: 12px; align-items: flex-start; }
+  .modal > header > button { flex: none; width: 38px; height: 38px; }
+  .modal > header p { line-height: 1.6; }
+  .modal > footer .btn { min-height: 42px; }
+  .template-modal { height: min(760px, calc(100dvh - 24px)); }
+  .template-list article { grid-template-columns: 64px minmax(0,1fr) 38px; gap: 10px; }
+  .template-cover { width: 64px; height: 48px; }
+  .template-info { grid-column: 2 / 4; }
+  .template-list article > .btn, .template-list article > .danger-icon { min-height: 40px; width: 100%; padding: 0 6px; }
+  .management-modal { height: calc(100vh - 24px); height: calc(100dvh - 24px); padding: 16px; }
+  .management-tabs { gap: 5px; }
+  .management-tabs button { flex: 1; padding: 11px 5px; font-size: 13px; }
+  .type-row { gap: 6px; }
+  .type-row-name { flex-basis: 100%; }
+  .type-row > .btn { min-height: 40px; padding: 0 10px; }
+  .type-action { flex-wrap: wrap; padding: 10px; }
+  .type-action input, .type-action select { flex-basis: 100%; min-height: 40px; }
+  .asset-toolbar { flex-wrap: wrap; gap: 12px; }
+  .asset-toolbar > input { flex-basis: 100%; min-height: 40px; }
+  .asset-lightbox { padding: 16px; }
+  .asset-lightbox > img { max-width: 100%; }
+  .asset-lightbox > span { overflow-wrap: anywhere; max-width: 100%; }
+  .backup-section input[type="file"] { max-width: 100%; }
+  .export-modal { overflow: hidden; }
+  .export-help { font-size: 13px; }
+  .export-actions .btn { min-height: 42px; }
+  .toast { bottom: calc(66px + env(safe-area-inset-bottom)); max-width: calc(100vw - 24px); width: max-content; text-align: center; line-height: 1.5; }
+  .login-page { min-height: 100vh; min-height: 100dvh; padding: 20px; }
+  .login-card { padding: 28px; }
+}
+@media (max-width: 520px) {
+  .modal-grid { grid-template-columns: 1fr; gap: 16px; }
+  .image-field { width: 160px; justify-self: center; }
+  .asset-grid { gap: 10px; }
+  .asset-card { padding: 8px; }
+  .asset-card > .btn { width: 100%; }
+  .backup-row { gap: 8px; }
+}

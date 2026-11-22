@@ -66,6 +66,18 @@ test('single-admin data management lifecycle', { timeout: 60000 }, async t => {
     await json('/api/templates/'+other.id,{method:'DELETE'})
     await json('/api/draft',{method:'PUT',body:{config:config([device]),templateId:template.id,revision}})
   })
+  await t.test('vertical crop persists in templates and draft; invalid values do not replace saved content',async()=>{
+    const updated=await json('/api/templates/'+template.id,{method:'PUT',body:{config:{...template.config,imagePositionY:85}}})
+    assert.equal(updated.config.imagePositionY,85)
+    await json('/api/draft',{method:'PUT',body:{config:updated.config,templateId:template.id,revision}})
+    for(const imagePositionY of [-1,101,'50']) {
+      assert.equal((await request('/api/templates/'+template.id,{method:'PUT',body:{config:{...updated.config,imagePositionY}}})).status,400)
+    }
+    await stop();await start();await login()
+    const data=await json('/api/bootstrap')
+    assert.equal(data.templates.find(t=>t.id===template.id).config.imagePositionY,85)
+    assert.equal(data.draft.config.imagePositionY,85)
+  })
   await t.test('type rename/merge updates devices, template snapshots and draft; deletion checks all references',async()=>{
     await json('/api/types',{method:'POST',body:{name:'办公显示器'}})
     let data=await json('/api/types/manage',{method:'POST',body:{action:'rename',from:'显示器',to:'屏幕'}})

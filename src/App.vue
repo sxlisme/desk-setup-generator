@@ -23,6 +23,13 @@ const creatingType = ref(false)
 const deviceLibrary = ref([])
 const templates = ref([])
 const activePanel = ref('content')
+const mobileTab = ref('preview')
+const showExport = ref(false)
+const exportUrl = ref('')
+const exportFilename = ref('')
+const canShareExport = ref(false)
+const sharingExport = ref(false)
+let exportFile = null
 const search = ref('')
 const typeFilter = ref('全部')
 const showDeviceModal = ref(false)
@@ -45,6 +52,7 @@ const defaultConfig = () => ({
   footerNote: 'DESK SETUP NOTES · 设备清单持续更新',
   heroImage: '/default-setup.png',
   imagePosition: 50,
+  imagePositionY: 50,
   overlay: 18,
   titleSize: 100,
   subtitleSize: 100,
@@ -150,7 +158,9 @@ async function logout() {
   try {
     await flushDraft(); await api('/api/auth/logout', { method: 'POST' })
     authenticated.value = false; csrfToken.value = ''; showManagement.value = false
-    showTemplateList.value = false; showTemplateModal.value = false; closeDeviceModal()
+    showTemplateList.value = false; showTemplateModal.value = false; showExport.value = false; closeDeviceModal()
+    if (exportUrl.value) URL.revokeObjectURL(exportUrl.value)
+    exportUrl.value = ''; exportFile = null
   } catch (error) { notify(error.message) } finally { busy.value = false }
 }
 
@@ -437,12 +447,12 @@ function loadImage(src) {
   })
 }
 
-function drawCover(ctx, image, x, y, width, height, position = 50) {
+function drawCover(ctx, image, x, y, width, height, position = 50, positionY = 50) {
   const scale = Math.max(width / image.width, height / image.height)
   const drawWidth = image.width * scale
   const drawHeight = image.height * scale
   const offsetX = x + (width - drawWidth) * (position / 100)
-  const offsetY = y + (height - drawHeight) / 2
+  const offsetY = y + (height - drawHeight) * (positionY / 100)
   ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight)
 }
 
@@ -462,6 +472,7 @@ function fitText(ctx, text, maxWidth, startSize, weight = 700) {
 }
 
 async function exportPng() {
+  if (busy.value) return
   busy.value = true
   notify('正在生成 4K 图片…')
   await nextTick()
@@ -483,7 +494,7 @@ async function exportPng() {
     ctx.save()
     roundedRect(ctx, 0, 0, width, heroHeight + 50, 0)
     ctx.clip()
-    drawCover(ctx, hero, 0, 0, width, heroHeight + 50, config.imagePosition)
+    drawCover(ctx, hero, 0, 0, width, heroHeight + 50, config.imagePosition, config.imagePositionY)
     ctx.fillStyle = `rgba(16, 29, 37, ${config.overlay / 100})`
     ctx.fillRect(0, 0, width, heroHeight + 50)
     ctx.restore()
@@ -606,17 +617,47 @@ async function exportPng() {
     ctx.font = '500 30px "Microsoft YaHei", sans-serif'
     ctx.fillText(config.account, width - 132, height - 92)
 
-    const link = document.createElement('a')
-    link.download = `${config.title || '桌搭清单'}-4K.png`
-    link.href = canvas.toDataURL('image/png', 1)
-    link.click()
-    notify('4K 图片已导出')
+    const blob = await new Promise((resolve, reject) => {
+      canvas.toBlob(result => result ? resolve(result) : reject(new Error('图片生成失败，请重试')), 'image/png')
+    })
+    if (exportUrl.value) URL.revokeObjectURL(exportUrl.value)
+    exportFilename.value = `${config.title || '桌搭清单'}-4K.png`
+    exportUrl.value = URL.createObjectURL(blob)
+    exportFile = new File([blob], exportFilename.value, { type: 'image/png' })
+    try {
+      canShareExport.value = Boolean(window.isSecureContext && navigator.share && navigator.canShare?.({ files: [exportFile] }))
+    } catch { canShareExport.value = false }
+    showExport.value = true
+    // Mobile browsers need a fresh user gesture after asynchronous image generation.
+    // Keep the actual image visible even if a browser ignores a download request.
+    if (!window.matchMedia('(max-width: 1100px), (pointer: coarse)').matches) downloadExport()
+    notify('图片已生成，请在预览中保存')
+
   } catch (error) {
     console.error(error)
     notify('导出失败，请检查图片后重试')
   } finally {
     busy.value = false
   }
+}
+
+function downloadExport() {
+  if (!exportUrl.value) return
+  const link = document.createElement('a')
+  link.href = exportUrl.value
+  link.download = exportFilename.value
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  notify('已请求下载；也可长按图片保存')
+}
+
+async function shareExport() {
+  if (!exportFile || sharingExport.value) return
+  sharingExport.value = true
+  try { await navigator.share({ files: [exportFile], title: config.title || '桌搭清单' }) }
+  catch (error) { if (error.name !== 'AbortError') notify('暂时无法分享，请长按图片保存或点击下载') }
+  finally { sharingExport.value = false }
 }
 
 watch([config, activeTemplateId], () => {
@@ -626,7 +667,7 @@ watch([config, activeTemplateId], () => {
   draftTimer = setTimeout(() => flushDraft().catch(() => {}), 500)
 }, { deep: true })
 
-onUnmounted(() => { document.removeEventListener('paste', onImagePaste); clearTimeout(draftTimer) })
+onUnmounted(() => { document.removeEventListener('paste', onImagePaste); clearTimeout(draftTimer); if (exportUrl.value) URL.revokeObjectURL(exportUrl.value) })
 onMounted(async () => {
   document.addEventListener('paste', onImagePaste)
   try {
@@ -670,11 +711,11 @@ onMounted(async () => {
         <button class="btn ghost" :disabled="busy" @click="openSaveAs">另存为</button>
         <button class="btn ghost" :disabled="busy" @click="openManagement">数据管理</button>
         <button class="btn ghost" :disabled="busy" @click="logout">退出</button>
-        <button class="btn primary" :disabled="busy" @click="exportPng"><span class="icon">↓</span> 导出 4K PNG</button>
+        <button class="btn primary" :disabled="busy" @click="exportPng"><span class="icon">↓</span><span class="desktop-export-label">导出 4K PNG</span><span class="mobile-export-label">导出图片</span></button>
       </div>
     </header>
 
-    <main class="workspace">
+    <main class="workspace" :class="`mobile-${mobileTab}`">
       <aside class="sidebar settings-panel">
         <nav class="panel-tabs">
           <button :class="{ active: activePanel === 'content' }" @click="activePanel = 'content'">内容</button>
@@ -690,7 +731,10 @@ onMounted(async () => {
             </button>
             <input ref="imageInput" hidden type="file" accept="image/*" @change="onImageUpload($event, 'hero')" />
             <label class="range-label"><span>照片水平位置</span><b>{{ config.imagePosition }}%</b></label>
-            <input v-model.number="config.imagePosition" type="range" min="0" max="100" />
+            <input v-model.number="config.imagePosition" aria-label="照片水平位置" type="range" min="0" max="100" />
+            <label class="range-label"><span>照片垂直位置</span><b>{{ config.imagePositionY }}%</b></label>
+            <input v-model.number="config.imagePositionY" aria-label="照片垂直位置" type="range" min="0" max="100" />
+            <p class="image-position-hint">调整照片裁切位置；该方向没有超出边框时，拖动不会改变画面。</p>
           </section>
 
           <section class="control-section">
@@ -765,7 +809,7 @@ onMounted(async () => {
             '--copy-y': `${config.heroTextY}%`
           }">
             <section class="poster-hero">
-              <img :src="config.heroImage" alt="桌搭主图" :style="{ objectPosition: `${config.imagePosition}% center` }" />
+              <img :src="config.heroImage" alt="桌搭主图" :style="{ objectPosition: `${config.imagePosition}% ${config.imagePositionY}%` }" />
               <div class="hero-shade" :style="{ opacity: config.overlay / 100 }" />
               <div class="hero-copy">
                 <span>{{ config.eyebrow }}</span>
@@ -857,8 +901,13 @@ onMounted(async () => {
         <button class="create-device" @click="openCreateDevice">＋ 新增设备配置</button>
       </aside>
     </main>
+    <nav class="mobile-nav" aria-label="工作区切换">
+      <button :class="{active:mobileTab==='preview'}" :aria-pressed="mobileTab==='preview'" @click="mobileTab='preview'">预览</button>
+      <button :class="{active:mobileTab==='settings'}" :aria-pressed="mobileTab==='settings'" @click="mobileTab='settings'">编辑</button>
+      <button :class="{active:mobileTab==='library'}" :aria-pressed="mobileTab==='library'" @click="mobileTab='library'">设备库</button>
+    </nav>
 
-    <div v-if="showDeviceModal" class="modal-backdrop" @click.self="closeDeviceModal">
+    <div v-if="showDeviceModal" class="modal-backdrop">
       <form class="modal" @submit.prevent="saveDevice">
         <header><div><h2>{{ isEditingDevice ? '编辑设备' : '新增设备' }}</h2><p>{{ isEditingDevice ? '保存后会同步更新设备库和当前预览' : '保存后会进入设备库并加入当前预览' }}</p></div><button type="button" @click="closeDeviceModal">×</button></header>
         <div class="modal-grid">
@@ -884,7 +933,7 @@ onMounted(async () => {
       </form>
     </div>
 
-    <div v-if="showTemplateModal" class="modal-backdrop" @click.self="showTemplateModal = false">
+    <div v-if="showTemplateModal" class="modal-backdrop">
       <form class="modal compact" @submit.prevent="saveTemplate">
         <header><div><h2>另存为模板</h2><p>创建独立模板，保留当前照片、文案和设备顺序</p></div><button type="button" @click="showTemplateModal = false">×</button></header>
         <label class="field"><span>模板名称</span><input v-model="templateName" placeholder="例如：银白桌搭 2026" autofocus /></label>
@@ -892,7 +941,7 @@ onMounted(async () => {
       </form>
     </div>
 
-    <div v-if="showTemplateList" class="modal-backdrop" @click.self="showTemplateList = false">
+    <div v-if="showTemplateList" class="modal-backdrop">
       <section class="modal template-modal">
         <header><div><h2>模板库</h2><p>载入以前保存的桌搭清单</p></div><button @click="showTemplateList = false">×</button></header>
         <div class="search-box template-search"><input v-model="templateSearch" aria-label="搜索模板" placeholder="搜索模板名称或编号" /></div>
@@ -913,6 +962,19 @@ onMounted(async () => {
       </section>
     </div>
 
+    <div v-if="showExport" class="modal-backdrop export-backdrop">
+      <section class="modal export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title">
+        <header><div><h2 id="export-title">图片已生成</h2><p>3072 × 4096 · PNG</p></div><button aria-label="关闭导出预览" @click="showExport=false">×</button></header>
+        <p class="export-help">手机上可长按下方图片，选择“存储图像”或“保存图片”。下载按钮通常保存到“文件”或“下载”目录。</p>
+        <div class="export-actions">
+          <button class="btn primary" @click="downloadExport">下载 PNG</button>
+          <a class="btn ghost" :href="exportUrl" target="_blank" rel="noopener">打开原图</a>
+          <button v-if="canShareExport" class="btn ghost" :disabled="sharingExport" @click="shareExport">分享图片</button>
+        </div>
+        <div class="export-preview"><img :src="exportUrl" :alt="exportFilename" /></div>
+        <p class="export-footnote">若当前应用无法保存，请使用系统浏览器打开网页后导出。</p>
+      </section>
+    </div>
     <AdminPanel v-if="showManagement" :request="api" :data="managementData" @close="showManagement=false" @change="managementChanged" />
     <transition name="toast"><div v-if="toast" class="toast">{{ toast }}</div></transition>
   </div>

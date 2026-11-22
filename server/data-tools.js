@@ -25,7 +25,8 @@ export function validateConfig(config, types) {
   imageUrl(config.heroImage || '')
   for (const device of config.devices) validateDevice(device, types)
   for (const key of ['title','subtitle','eyebrow','listTitle','listSubtitle','account','footerNote','accent']) if (config[key] !== undefined && (typeof config[key] !== 'string' || config[key].length > 2000)) throw fail('模板文字无效或过长')
-  for (const key of ['imagePosition','overlay','titleSize','subtitleSize','heroTextX','heroTextY']) if (config[key] !== undefined && (!Number.isFinite(config[key]) || Math.abs(config[key]) > 1000)) throw fail('模板布局参数无效')
+  for (const key of ['imagePosition','imagePositionY','overlay','titleSize','subtitleSize','heroTextX','heroTextY']) if (config[key] !== undefined && (!Number.isFinite(config[key]) || Math.abs(config[key]) > 1000)) throw fail('模板布局参数无效')
+  if (config.imagePositionY !== undefined && (config.imagePositionY < 0 || config.imagePositionY > 100)) throw fail('照片垂直位置须在 0–100 之间')
   if (config.layout !== undefined && !['single','double'].includes(config.layout)) throw fail('模板布局无效')
 }
 export function validateData(data) {

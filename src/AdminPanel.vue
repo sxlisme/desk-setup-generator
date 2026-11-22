@@ -114,6 +114,6 @@ onMounted(()=>selectTab('types'))
       </div>
       <p v-if="working" class="management-help" role="status">正在处理，请稍候…</p>
     </section>
-    <div v-if="selectedAsset" class="asset-lightbox" @click.self="selectedAsset=null"><button class="btn" @click="selectedAsset=null">关闭图片预览</button><img :src="selectedAsset.url" :alt="selectedAsset.name" /><span>{{ selectedAsset.name }}</span></div>
+    <div v-if="selectedAsset" class="asset-lightbox"><button class="btn" @click="selectedAsset=null">关闭图片预览</button><img :src="selectedAsset.url" :alt="selectedAsset.name" /><span>{{ selectedAsset.name }}</span></div>
   </div>
 </template>
